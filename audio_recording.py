@@ -1,17 +1,25 @@
-import pyaudio
 import wave
 import os
 import datetime
 import time
 import threading  # Pour gérer l'entrée utilisateur
-# import RPi.GPIO as GPIO
+import sys
 
-# PIN_HOOK_SWITCH = 18  # Le numéro GPIO du hook switch
-# GPIO.setmode(GPIO.BCM)
-# GPIO.setup(PIN_HOOK_SWITCH, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+class NoAlsaErrors:
+    def __enter__(self):
+        self._stderr = sys.stderr
+        sys.stderr = open(os.devnull, "w")
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        sys.stderr.close()
+        sys.stderr = self._stderr
+
+with NoAlsaErrors():
+    import pyaudio  # Importe PyAudio sans afficher les erreurs ALSA
 
 duration_max=60 # Durée max en seconde d'un enregistrement
-base_path = "./livre_or_enregistrements/" # Chemin du dossier où seront sauvegardés les enregistrements
+current_dir = os.path.dirname(os.path.abspath(__file__))
+base_path = os.path.join(current_dir, 'livre_or_enregistrements')
 
 if not os.path.exists(base_path):
     os.makedirs(base_path)
@@ -25,12 +33,12 @@ def get_next_filename():
     numeros = [int(f.split('_')[0]) for f in fichiers if f.endswith('.wav')]
 
     # Générer un horodatage au format hh-mm-ss
-    timestamp = datetime.datetime.now().strftime("%H-%M-%S")
+    timestamp = datetime.datetime.now().strftime("%d%m%Y-%H%M%S")
     
     if numeros:
-        return os.path.join(base_path, f"{max(numeros) + 1:05d}_message-audio_{timestamp}.wav")
+        return os.path.join(base_path, f"{max(numeros) + 1:05d}_message_{timestamp}.wav")
     else:
-        return os.path.join(base_path, f"00001_message-audio_{timestamp}.wav")
+        return os.path.join(base_path, f"00001_message_{timestamp}.wav")
 
 # Fonction d'écoute de l'entrée utilisateur
 def listen_for_stop():
@@ -43,20 +51,34 @@ def listen_for_stop():
             break
 
 # Fonction d'écoute du hook switch GPIO
-# def listen_for_gpio():
-#     global recording
-#     while recording:
-#         if GPIO.input(PIN_HOOK_SWITCH) == GPIO.LOW:  # Si le combiné est reposé
-#             print("Combiné reposé, arrêt de l'enregistrement.")
-#             recording = False
-#             break
-#         time.sleep(0.1)  # Petite pause pour éviter de surcharger le CPU
+def listen_for_gpio():
+    global recording
+    global line
+    while recording:
+        # Lecture directe de la broche
+        state = line.get_value()
+
+        # Interprétation simple
+        if state == 0:
+            print("Arrêt de l'enregistrement demandé par l'utilisateur.")
+            recording = False
+            break
+
+        time.sleep(0.1)  # Petite pause pour éviter de surcharger le CPU
 
 # Enregistrement audio
-def record_audio(duration=duration_max):
+def record_audio(lineFromMain, duration=duration_max):
     """Enregistrer l'audio après avoir joué le message."""
+
     global recording
-    chunk = 1024  # Taille des morceaux d'audio
+    global line
+
+    recording = True
+
+    if lineFromMain is not None :
+        line = lineFromMain
+
+    chunk = 4096  # Taille des morceaux d'audio
     sample_format = pyaudio.paInt16  # Format audio
     channels = 1  # Mono
     rate = 44100  # Fréquence d'échantillonnage
@@ -67,17 +89,19 @@ def record_audio(duration=duration_max):
                     channels=channels,
                     rate=rate,
                     frames_per_buffer=chunk,
-                    input=True)
+                    input=True,
+                    input_device_index=0)
 
     print("========> Enregistrement en cours...")
 
     frames = []
     start_time = time.time()
-    recording = True
 
     # Lancer les threads pour écouter l'utilisateur et le GPIO
-    threading.Thread(target=listen_for_stop, daemon=True).start()
-    # threading.Thread(target=listen_for_gpio, daemon=True).start()
+    if lineFromMain is not None :
+        threading.Thread(target=listen_for_gpio, daemon=True).start()
+    else :
+        threading.Thread(target=listen_for_stop, daemon=True).start()
 
     while recording:
         data = stream.read(chunk)
